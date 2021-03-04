@@ -29,31 +29,27 @@ protected:
     double hat;
     // Выделяем позвоночник
     double spine;
-    // Угловая скорость (в общем случае конечно тоже 3 компоненты, но мы упростим)
-    double w;
-    // Скорость
-    /*double vx;
-    double vy;
-    double vz;*/
+    // Угловая скорость
+    double wx;
+    double wy;
+    double wz;
 
 public:
     // Конструктор по умолчанию
-    CalcNode() : x(0.0), y(0.0), z(0.0), hat(0.0), spine(0.0), w(0.0)/*, vx(0.0), vy(0.0), vz(0.0)*/ {
+    CalcNode() : x(0.0), y(0.0), z(0.0), hat(0.0), spine(0.0), wx(0.0), wy(0.0), wz(0.0) {
     }
 
     // Конструктор с указанием всех параметров
-    CalcNode(double x, double y, double z, double hat, double spine, double w/*, double vx, double vy, double vz*/)
-            : x(x), y(y), z(z), hat(hat), spine(spine), w(w)/*, vx(vx), vy(vy), vz(vz)*/ {
+    CalcNode(double x, double y, double z, double hat, double spine, double wx)
+            : x(x), y(y), z(z), hat(hat), spine(spine), wx(wx) {
     }
 
-    // Метод отвечает за перемещение точки
-    // Движемся время tau из текущего положения с текущей скоростью
+    // Перемещение точки
+    // Вращение вокруг точки (-5, 1, 0)
     void move(double tau) {
-        /*x += vx * tau;
-        y += vy * tau;
-        z += vz * tau;*/
-        y += -w * (z) * tau;
-        z += w * (y - 1) * tau;
+        x += (wy * z - wz * (y - 1)) * tau;
+        y += (wz * (x + 5) - wx * z) * tau;
+        z += (wx * (y - 1) - wy * (x + 5)) * tau;
     }
 };
 
@@ -81,28 +77,30 @@ public:
 
         // Пройдём по узлам в модели gmsh
         nodes.resize(nodesCoords.size() / 3);
-        for (unsigned int i = 0; i < nodesCoords.size() / 3; i++) {
+        for (unsigned int i = 0; i < nodesCoords.size() / 3; ++i) {
             // Координаты заберём из gmsh
             double pointX = nodesCoords[i * 3];
             double pointY = nodesCoords[i * 3 + 1];
             double pointZ = nodesCoords[i * 3 + 2];
-            // Модельная скалярная величина распределена как-то вот так
+            // Выделяем шапку
             double hat = pointX > 0 ? 1 : 0;
+            // Выделяем позвоночник
             double spine = (pow(pointY, 2) + pow(pointZ, 2)) < 2.3 && pointX < -5 ? 1 : 0;
-            double w = pointX > -5 ? 1 : 0;
+            // Задаём начальную угловую скорость для поворота головы
+            double wx;
             if (pointX > -5) {
-                w = 1;
+                wx = 1;
             } else if (pointX > -6) {
-                w = pointX + 6;
+                wx = pointX + 6;
             } else {
-                w = 0;
+                wx = 0;
             }
-            nodes[i] = CalcNode(pointX, pointY, pointZ, hat, spine, w);
+            nodes[i] = CalcNode(pointX, pointY, pointZ, hat, spine, wx);
         }
 
         // Пройдём по элементам в модели gmsh
         elements.resize(tetrsPoints.size() / 4);
-        for (unsigned int i = 0; i < tetrsPoints.size() / 4; i++) {
+        for (unsigned int i = 0; i < tetrsPoints.size() / 4; ++i) {
             elements[i].nodesIds[0] = tetrsPoints[i * 4] - 1;
             elements[i].nodesIds[1] = tetrsPoints[i * 4 + 1] - 1;
             elements[i].nodesIds[2] = tetrsPoints[i * 4 + 2] - 1;
@@ -110,10 +108,22 @@ public:
         }
     }
 
+    // Метод задаёт угловую скорость точкам (при вращении у всех одинаковая, так что технически это честно)
+    void setw(double wx, double wy, double wz) {
+        for (unsigned int i = 0; i < nodes.size(); ++i) {
+            // Не совсем честно использовать тут условие, функция получается не очень общая. Но мы используем.
+            if (nodes[i].x > -5) {
+                nodes[i].wx = wx;
+                nodes[i].wy = wy;
+                nodes[i].wz = wz;
+            }
+        }
+    }
+
     // Метод отвечает за выполнение для всей сетки шага по времени величиной tau
     void doTimeStep(double tau) {
         // По сути метод просто двигает все точки
-        for (unsigned int i = 0; i < nodes.size(); i++) {
+        for (unsigned int i = 0; i < nodes.size(); ++i) {
             nodes[i].move(tau);
         }
     }
@@ -125,7 +135,7 @@ public:
         // Точки сетки в терминах VTK
         vtkSmartPointer<vtkPoints> dumpPoints = vtkSmartPointer<vtkPoints>::New();
 
-        // Скалярное поле на точках сетки
+        // Шапка и позвоночник
         auto hat = vtkSmartPointer<vtkDoubleArray>::New();
         hat->SetName("hat");
         auto spine = vtkSmartPointer<vtkDoubleArray>::New();
@@ -137,12 +147,15 @@ public:
         vel->SetNumberOfComponents(3);
 
         // Обходим все точки нашей расчётной сетки
-        for (unsigned int i = 0; i < nodes.size(); i++) {
+        for (unsigned int i = 0; i < nodes.size(); ++i) {
             // Вставляем новую точку в сетку VTK-снапшота
             dumpPoints->InsertNextPoint(nodes[i].x, nodes[i].y, nodes[i].z);
 
             // Добавляем значение векторного поля в этой точке
-            double _vel[3] = {0, -nodes[i].w * nodes[i].z, nodes[i].w * (nodes[i].y - 1)};
+            double vx = nodes[i].wy * nodes[i].z - nodes[i].wz * (nodes[i].y - 1);
+            double vy = nodes[i].wz * (nodes[i].x + 5) - nodes[i].wx * nodes[i].z;
+            double vz = nodes[i].wx * (nodes[i].y - 1) - nodes[i].wy * (nodes[i].x + 5);
+            double _vel[3] = {vx, vy, vz};
             vel->InsertNextTuple(_vel);
 
             // И значение скалярного поля тоже
@@ -159,7 +172,7 @@ public:
         unstructuredGrid->GetPointData()->AddArray(spine);
 
         // А теперь пишем, как наши точки объединены в тетраэдры
-        for (unsigned int i = 0; i < elements.size(); i++) {
+        for (unsigned int i = 0; i < elements.size(); ++i) {
             auto tetra = vtkSmartPointer<vtkTetra>::New();
             tetra->GetPointIds()->SetId(0, elements[i].nodesIds[0]);
             tetra->GetPointIds()->SetId(1, elements[i].nodesIds[1]);
@@ -178,16 +191,10 @@ public:
 };
 
 int main() {
-    // Шаг точек по пространству
-    double h = 4.0;
-    // Шаг по времени
     double tau = 0.01;
 
     const unsigned int GMSH_TETR_CODE = 4;
 
-    // Теперь придётся немного упороться:
-    // (а) построением сетки средствами gmsh,
-    // (б) извлечением данных этой сетки в свой код.
     gmsh::initialize();
     gmsh::model::add("aleut");
 
@@ -201,7 +208,7 @@ int main() {
     }
 
     // Восстановим геометрию
-    double angle = 40;
+    double angle = 20;
     bool forceParametrizablePatches = false;
     bool includeBoundary = true;
     double curveAngle = 180;
@@ -239,7 +246,7 @@ int main() {
     std::vector<std::vector<std::size_t>> elementTags;
     std::vector<std::vector<std::size_t>> elementNodeTags;
     gmsh::model::mesh::getElements(elementTypes, elementTags, elementNodeTags);
-    for (unsigned int i = 0; i < elementTypes.size(); i++) {
+    for (unsigned int i = 0; i < elementTypes.size(); ++i) {
         if (elementTypes[i] != GMSH_TETR_CODE)
             continue;
         tetrsNodesTags = &elementNodeTags[i];
@@ -261,24 +268,38 @@ int main() {
     // И ещё проверим, что в тетраэдрах что-то похожее на правду лежит.
     assert(tetrsNodesTags->size() % 4 == 0);
 
-    // TODO: неплохо бы полноценно данные сетки проверять, да
-
     CalcMesh mesh(nodesCoord, *tetrsNodesTags);
 
     gmsh::finalize();
 
     mesh.snapshot(0);
 
+    // Глядим влево
     for (int i = 1; i <= 25; ++i) {
         mesh.doTimeStep(0.01);
         mesh.snapshot(i);
     }
+    // Глядим вправо
     for (int i = 26; i <= 75; ++i) {
         mesh.doTimeStep(-0.01);
         mesh.snapshot(i);
     }
+
+    // Голову в исходное положение
     for (int i = 76; i <= 100; ++i) {
         mesh.doTimeStep(0.01);
+        mesh.snapshot(i);
+    }
+
+    mesh.setw(0, 0, 1);
+
+    // Киваем
+    for (int i = 101; i <= 110; ++i) {
+        mesh.doTimeStep(0.01);
+        mesh.snapshot(i);
+    }
+    for (int i = 111; i <= 120; ++i) {
+        mesh.doTimeStep(-0.01);
         mesh.snapshot(i);
     }
 
